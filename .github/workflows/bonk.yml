@@ -1,0 +1,78 @@
+# .github/workflows/bonk.yml for <BASE_OWNER>/bonk-test (the lab base repo).
+# Mirrors kumo's bonk.yml so the demo reflects the real setup, but points
+# oidc_base_url at YOUR self-hosted Worker and uses YOUR model credentials.
+name: Bonk
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bonk:
+    if: github.event.sender.type != 'Bot' && (contains(github.event.comment.body, '/bonk') || contains(github.event.comment.body, '@ask-bonk'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write      # <-- this is what puts the OIDC mint creds in the agent's env
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check comment author has repository write access
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+        run: |
+          PERMISSION=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$COMMENT_AUTHOR/permission" --jq .permission)
+          case "$PERMISSION" in
+            admin|maintain|write) ;;
+            *) echo "::error::Comment author must have repository write access"; exit 1 ;;
+          esac
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build prompt with triggering comment
+        id: prompt
+        env:
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+        run: |
+          {
+            DELIMITER=$(openssl rand -hex 16)
+            echo "value<<$DELIMITER"
+            echo "You were invoked by @${COMMENT_AUTHOR} on ${COMMENT_URL}"
+            echo ""
+            echo "Their comment:"
+            echo '```'
+            echo "$COMMENT_BODY"
+            echo '```'
+            echo ""
+            echo "This is your task. Read it carefully and act on it."
+            echo ""
+            echo 'For PR review requests, after checkout, read and follow .github/bonk_reviewer.md from the current PR head, including its final-response Review notes expander.'
+            echo "$DELIMITER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Bonk
+        uses: Cloudflare-Studio/ask-bonk/github@main   # upstream action; only oidc_base_url is redirected
+        env:
+          # YOUR model provider creds — not Cloudflare's gateway:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        with:
+          oidc_base_url: https://ask-bonk-poc.hello-a91.workers.dev/auth    # YOUR self-hosted token server
+          model: "anthropic/claude-sonnet-4-5"   # FAKE pairing; OPENCODE_API_KEY is a fake secret
+          variant: "high"
+          mentions: "/bonk,@ask-bonk"
+          permissions: write
+          prompt: ${{ steps.prompt.outputs.value }}
